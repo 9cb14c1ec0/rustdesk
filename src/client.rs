@@ -214,14 +214,17 @@ impl Client {
                 }
             }
             Ok(x) => {
-                let direct_failures = interface.get_lch().read().unwrap().direct_failures;
-                let direct = x.0 .1;
-                if !interface.is_force_relay() && (direct_failures == 0) != direct {
-                    let n = if direct { 0 } else { 1 };
-                    log::info!("direct_failures updated to {}", n);
-                    interface.get_lch().write().unwrap().set_direct_failure(n);
+                // Set x.2 to true only in the connect() function to indicate that direct_failures needs to be updated; everywhere else it should be set to false.
+                if x.2 {
+                    let direct_failures = interface.get_lch().read().unwrap().direct_failures;
+                    let direct = x.0 .1;
+                    if !interface.is_force_relay() && (direct_failures == 0) != direct {
+                        let n = if direct { 0 } else { 1 };
+                        log::info!("direct_failures updated to {}", n);
+                        interface.get_lch().write().unwrap().set_direct_failure(n);
+                    }
                 }
-                Ok(x)
+                Ok((x.0, x.1))
             }
         }
     }
@@ -242,6 +245,7 @@ impl Client {
             &'static str,
         ),
         (i32, String),
+        bool,
     )> {
         if config::is_incoming_only() {
             bail!("Incoming only mode");
@@ -258,6 +262,7 @@ impl Client {
                     "TCP",
                 ),
                 (0, "".to_owned()),
+                false,
             ));
         }
         // Allow connect to {domain}:{port}
@@ -271,6 +276,7 @@ impl Client {
                     "TCP",
                 ),
                 (0, "".to_owned()),
+                false,
             ));
         }
 
@@ -352,7 +358,7 @@ impl Client {
         );
         connect_futures.push(fut.boxed());
         match select_ok(connect_futures).await {
-            Ok(conn) => Ok((conn.0 .0, conn.0 .1)),
+            Ok(conn) => Ok((conn.0 .0, conn.0 .1, conn.0 .2)),
             Err(e) => Err(e),
         }
     }
@@ -377,6 +383,7 @@ impl Client {
             &'static str,
         ),
         (i32, String),
+        bool,
     )> {
         let mut start = Instant::now();
         let mut socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;
@@ -565,7 +572,11 @@ impl Client {
                         log::info!("{:?} used to establish {typ} connection", start.elapsed());
                         let pk =
                             Self::secure_connection(&peer, signed_id_pk, &key, &mut conn).await?;
-                        return Ok(((conn, false, pk, kcp, typ), (feedback, rendezvous_server)));
+                        return Ok((
+                            (conn, typ == "IPv6", pk, kcp, typ),
+                            (feedback, rendezvous_server),
+                            false,
+                        ));
                     }
                     _ => {
                         log::error!("Unexpected protobuf msg received: {:?}", msg_in);
@@ -611,6 +622,7 @@ impl Client {
             )
             .await?,
             (feedback, rendezvous_server),
+            true,
         ))
     }
 
@@ -2120,7 +2132,19 @@ impl LoginConfigHandler {
                 option.show_remote_cursor = f(self.get_toggle_option("show-remote-cursor"));
                 option.enable_file_transfer = f(self.config.enable_file_copy_paste.v);
                 option.lock_after_session_end = f(self.config.lock_after_session_end.v);
+                if config.show_my_cursor.v {
+                    config.show_my_cursor.v = false;
+                    option.show_my_cursor = BoolOption::No.into();
+                }
             }
+        } else if name == "show-my-cursor" {
+            config.show_my_cursor.v = !config.show_my_cursor.v;
+            option.show_my_cursor = if config.show_my_cursor.v {
+                BoolOption::Yes
+            } else {
+                BoolOption::No
+            }
+            .into();
         } else {
             let is_set = self
                 .options
@@ -2213,6 +2237,9 @@ impl LoginConfigHandler {
         if view_only || self.get_toggle_option("show-remote-cursor") {
             msg.show_remote_cursor = BoolOption::Yes.into();
         }
+        if view_only && self.get_toggle_option("show-my-cursor") {
+            msg.show_my_cursor = BoolOption::Yes.into();
+        }
         if self.get_toggle_option("follow-remote-cursor") {
             msg.follow_remote_cursor = BoolOption::Yes.into();
         }
@@ -2297,6 +2324,8 @@ impl LoginConfigHandler {
             self.config.allow_swap_key.v
         } else if name == "view-only" {
             self.config.view_only.v
+        } else if name == "show-my-cursor" {
+            self.config.show_my_cursor.v
         } else if name == "follow-remote-cursor" {
             self.config.follow_remote_cursor.v
         } else if name == "follow-remote-window" {
@@ -3800,7 +3829,11 @@ pub fn check_if_retry(msgtype: &str, title: &str, text: &str, retry_for_relay: b
         && ((text.contains("10054") || text.contains("104")) && retry_for_relay
             || (!text.to_lowercase().contains("offline")
                 && !text.to_lowercase().contains("not exist")
-                && !text.to_lowercase().contains("handshake")
+                && (!text.to_lowercase().contains("handshake")
+                    // https://github.com/snapview/tungstenite-rs/blob/e7e060a89a72cb08e31c25a6c7284dc1bd982e23/src/error.rs#L248
+                    || text
+                        .to_lowercase()
+                        .contains("connection reset without closing handshake") && use_ws())
                 && !text.to_lowercase().contains("failed")
                 && !text.to_lowercase().contains("resolve")
                 && !text.to_lowercase().contains("mismatch")
