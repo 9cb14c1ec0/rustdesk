@@ -23,7 +23,7 @@ use std::{
     os::raw::{c_char, c_int, c_void},
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock,
     },
 };
@@ -756,7 +756,7 @@ impl InvokeUiSession for FlutterHandler {
     // unused in flutter
     fn clear_all_jobs(&self) {}
 
-    fn load_last_job(&self, _cnt: i32, job_json: &str) {
+    fn load_last_job(&self, _cnt: i32, job_json: &str, _auto_start: bool) {
         self.push_event("load_last_job", &[("value", job_json)], &[]);
     }
 
@@ -1328,6 +1328,7 @@ pub fn session_add(
         server_keyboard_enabled: Arc::new(RwLock::new(true)),
         server_file_transfer_enabled: Arc::new(RwLock::new(true)),
         server_clipboard_enabled: Arc::new(RwLock::new(true)),
+        reconnect_count: Arc::new(AtomicUsize::new(0)),
         ..Default::default()
     };
 
@@ -1980,7 +1981,7 @@ pub(super) fn session_update_virtual_display(session: &FlutterSession, index: i3
             let mut vdisplays = displays.split(',').collect::<Vec<_>>();
             let len = vdisplays.len();
             if index == 0 {
-                // 0 means we cann't toggle the virtual display by index.
+                // 0 means we can't toggle the virtual display by index.
                 vdisplays.remove(vdisplays.len() - 1);
             } else {
                 if let Some(i) = vdisplays.iter().position(|&x| x == index.to_string()) {
